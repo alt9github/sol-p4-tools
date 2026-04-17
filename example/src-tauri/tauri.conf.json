@@ -1,0 +1,22 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicegram/nicegram-web/refs/heads/master/nicegram.github.io/.tauri/tauri.conf.schema.json",
+  "productName": "sol-p4-tools-example",
+  "version": "0.0.0",
+  "identifier": "com.alt9.sol-p4-tools-example",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev -- --port 1420",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "sol-p4-tools · Demo",
+        "width": 800,
+        "height": 700,
+        "resizable": true
+      }
+    ]
+  }
+}
