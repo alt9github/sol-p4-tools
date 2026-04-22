@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.2.0 (2026-04-22)
+
+Windows UX + branch-detection robustness, environment diagnostics. Backported from LevelMetadataEditor.
+
+### Rust crate (`sol-p4-tools`)
+- `p4::p4_bare()` — new helper that builds a bare `p4` Command and applies the Windows `CREATE_NO_WINDOW` (0x08000000) creation flag. Every p4 spawn now routes through it (`p4_cmd` / `get_p4_stream` override branch / `list_p4_workspaces` x2). Eliminates the console window that flashed on every p4 subprocess invocation when the app was launched from a GUI (Tauri webview) parent on Windows.
+- `workspace.rs` — detection order reworked to **exe dir → cwd → `p4 info`**. Windows shortcut launches (where cwd may be `C:\Program Files\Perforce` etc.) now pin to the correct branch based on the executable location, not the launch cwd. New public helpers: `find_p4config_root`, `find_branch_root`, `exe_dir`.
+- `workspace::detect_data_dir` — Tauri command moved into the crate (previously lived in consumer apps). Same exe-first detection order; returns the active branch's `Deploy/GeneratedData_Server` path as `Option<String>`.
+- `diagnostics` — new module. `collect(app_version: &str) -> Diagnostics` returns a structured snapshot used by Settings → Diagnostics panels: resolved project root / data dir, p4 info parsed into `p4_client_name/root/stream`, `client_matches_exe` flag (component-wise path comparison, case-insensitive on Windows — avoids `C:\foo` vs `C:\foo_bar` false-match), and per-candidate (exe, cwd) ancestor analysis (`.p4config`, `MetaData/Schema`, `Deploy/...`). Exposed as a library function so each consumer registers a thin Tauri-command wrapper that captures its own `CARGO_PKG_VERSION`.
+
+### Fixes
+- `check_stale_revisions` — closure captured `Option<i64>` fields by move where it needed borrow; fixed `(df.as_ref(), hv.as_ref(), hd.as_ref())` so successive flush calls compile and work.
+
 ## v0.1.0 (2026-04-17)
 
 Initial scaffolding — extracted from LevelMetadataEditor and RewardEditor.

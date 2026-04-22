@@ -20,8 +20,24 @@ fn set_override(v: Option<P4Override>) {
     }
 }
 
-pub fn p4_cmd() -> std::process::Command {
+/// Build a bare `p4` Command. On Windows, suppresses the console window that
+/// would otherwise flash on every invocation from a GUI parent (Tauri webview).
+/// Always route p4 spawns through this (or `p4_cmd` for the override-applied
+/// variant) — do not call `Command::new("p4")` directly from consumers.
+pub fn p4_bare() -> std::process::Command {
+    #[allow(unused_mut)]
     let mut cmd = std::process::Command::new("p4");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW — https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags
+        cmd.creation_flags(0x08000000);
+    }
+    cmd
+}
+
+pub fn p4_cmd() -> std::process::Command {
+    let mut cmd = p4_bare();
     if let Some(o) = get_override() {
         if !o.server.is_empty() { cmd.args(["-p", &o.server]); }
         if !o.user.is_empty() { cmd.args(["-u", &o.user]); }
@@ -46,7 +62,7 @@ pub fn get_p4_stream(data_dir: Option<String>) -> String {
 
     if let Some(o) = get_override() {
         if !o.client.is_empty() {
-            let mut cmd = std::process::Command::new("p4");
+            let mut cmd = p4_bare();
             if !o.server.is_empty() { cmd.args(["-p", &o.server]); }
             if !o.user.is_empty() { cmd.args(["-u", &o.user]); }
             cmd.args(["client", "-o", &o.client]);
@@ -118,7 +134,7 @@ fn extract_stream_name(raw: &str) -> Option<String> {
 
 #[tauri::command]
 pub fn list_p4_workspaces(server: String, user: String) -> Result<Vec<P4Workspace>, String> {
-    let mut cmd = std::process::Command::new("p4");
+    let mut cmd = p4_bare();
     if !server.is_empty() { cmd.args(["-p", &server]); }
     if !user.is_empty() { cmd.args(["-u", &user]); }
     cmd.args(["clients", "-u", &user]);
@@ -135,7 +151,7 @@ pub fn list_p4_workspaces(server: String, user: String) -> Result<Vec<P4Workspac
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 5 || parts[0] != "Client" { continue; }
         let name = parts[1].to_string();
-        let mut spec_cmd = std::process::Command::new("p4");
+        let mut spec_cmd = p4_bare();
         if !server.is_empty() { spec_cmd.args(["-p", &server]); }
         if !user.is_empty() { spec_cmd.args(["-u", &user]); }
         spec_cmd.args(["client", "-o", &name]);
@@ -177,7 +193,7 @@ pub fn check_stale_revisions(pattern: String) -> Result<Vec<String>, String> {
     let mut stale = Vec::new();
     let (mut depot_file, mut have_rev, mut head_rev): (Option<String>, Option<i64>, Option<i64>) = (None, None, None);
     let mut flush = |df: &mut Option<String>, hv: &mut Option<i64>, hd: &mut Option<i64>| {
-        if let (Some(d), Some(h), Some(r)) = (df.as_ref(), hv, hd) {
+        if let (Some(d), Some(h), Some(r)) = (df.as_ref(), hv.as_ref(), hd.as_ref()) {
             if h < r { stale.push(format!("{} (local #{} < depot #{})", d, h, r)); }
         }
         *df = None; *hv = None; *hd = None;
