@@ -324,3 +324,44 @@ pub fn p4_revert_unchanged(pattern: &str) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// MS.4a: file 을 p4 pending CL 에 delete 표시. 성공 시 로컬 파일도 제거됨.
+/// 실패 (p4 미연결 / 미트래킹 등) 면 호출측이 OS 삭제로 fallback.
+pub fn p4_delete(path: &str) -> Result<(), String> {
+    let output = p4_cmd().args(["delete", path]).output().map_err(|e| format!("p4 delete: {e}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(())
+}
+
+/// MS.4a: file 을 unopened 상태로 되돌림 (어떤 pending action 이든). 이미 unopened
+/// 면 noop (실패 무시). p4 edit 상태 파일을 delete 하려면 먼저 revert 해야 하므로.
+pub fn p4_revert(path: &str) -> Result<(), String> {
+    let output = p4_cmd().args(["revert", path]).output().map_err(|e| format!("p4 revert: {e}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(())
+}
+
+/// `p4 protects -m //depot/...` 으로 사용자의 max access level 을 반환.
+///   - "list" / "read" / "open" / "write" / "review" / "admin" / "super" / "none"
+///   - 명령 실패 / 출력 비어있음 → "none" (안전 기본값)
+///   - p4 미설정 / 서버 미연결 → Err 반환 (caller 가 처리)
+pub fn p4_max_protect(depot_path: &str) -> Result<String, String> {
+    let output = p4_cmd()
+        .args(["protects", "-m", depot_path])
+        .output()
+        .map_err(|e| format!("p4 protects: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        // "no protections defined" 류는 read 도 없는 상태로 처리 (none)
+        if stderr.contains("no protections") || stderr.contains("no permission") {
+            return Ok("none".to_string());
+        }
+        return Err(stderr);
+    }
+    let level = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(if level.is_empty() { "none".to_string() } else { level })
+}

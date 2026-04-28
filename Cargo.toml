@@ -1,6 +1,6 @@
 [package]
 name = "sol-p4-tools"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Perforce (P4) integration toolkit for Tauri v2 apps"
 repository = "https://github.com/alt9github/sol-p4-tools"
