@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.3.0 (2026-04-28)
+
+P4 protections + delete/revert helpers. Backported from MetadataEditor (CL 202722) — used by the new "MetaData 폴더 권한 기반 read-only 게이팅" feature.
+
+### Rust crate (`sol-p4-tools`)
+- `p4::p4_max_protect(depot_path)` — query the user's max access level via `p4 protects -m <path>`. Returns `"list"`/`"read"`/`"open"`/`"write"`/`"review"`/`"admin"`/`"super"` or `"none"` (mapped from `no protections defined` / `no permission` stderr). Caller maps to UI gating tiers (write / read / none / unknown).
+- `p4::p4_delete(path)` — mark file for delete in the pending CL. Used by apps that surface a "delete this file" action under Perforce control (e.g., View Designer 의 view 파일 삭제).
+- `p4::p4_revert(path)` — revert any pending action; prerequisite for delete-after-edit flows where a file might already be open for edit before the user requests deletion.
+
+### TypeScript package (`@alt9github/sol-p4-tools`)
+- `ts/package.json` — added `vitest` devDependency + `test` / `test:watch` / `typecheck` scripts.
+- `ts/vitest.config.ts` — minimal node-environment vitest config so the TS package can run its own tests in line with the Rust crate's `cargo test`.
+
+> Note: this CHANGELOG entry was committed to `main` after the `v0.3.0` tag was published — the tag itself does not include this entry. Future releases (`v0.3.1+`) will have CHANGELOG land in the same commit as the version bump.
+
 ## v0.2.0 (2026-04-22)
 
 Windows UX + branch-detection robustness, environment diagnostics. Backported from LevelMetadataEditor.
