@@ -46,46 +46,70 @@ pub fn p4_cmd() -> std::process::Command {
     cmd
 }
 
-/// SL-17200 (v0.3.4): Windows P4 client 가 stdout 에 system ACP (e.g., CP949
-/// 한국어 Windows) 로 변환해 출력 — `-Mj` JSON output 도 동일. `from_utf8_lossy`
-/// 가 깨진 문자열 생성. `MultiByteToWideChar(CP_ACP, ...)` 로 system codepage
-/// 정확하게 decode → UTF-8 String. Linux/macOS 는 UTF-8 그대로 (`from_utf8_lossy`).
+/// SL-17200 (v0.3.4/v0.3.5): P4 stdout 의 인코딩이 OS / P4 client / stdio
+/// 종류에 따라 달라 fallback chain 으로 처리:
+///   1. UTF-8 valid 이면 그대로 (macOS / Linux / P4 가 UTF-8 emit 하는 Windows).
+///   2. Windows 에서 `MultiByteToWideChar(CP_ACP, ...)` 로 system codepage
+///      (CP949 등) decode 시도.
+///   3. Windows 에서 OEM codepage fallback (console default 와 다른 경우).
+///   4. 최후 fallback — `from_utf8_lossy` (깨진 문자라도 panic 없이).
+///
+/// UTF-8 first 는 `-Mj` JSON output 이 Windows pipe stdio 에서도 raw UTF-8
+/// bytes 일 가능성 (`chcp 65001` 후 정상 표시되는 것이 console encoding
+/// 변경 vs P4 출력 인코딩 변경 어느 쪽인지 모호 — UTF-8 valid 검사가
+/// 가장 안전).
 pub fn decode_p4_stdout(bytes: &[u8]) -> String {
+    // Step 1: UTF-8 valid?
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+
+    // Step 2/3: Windows codepage fallback
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::OsStringExt;
-        use windows_sys::Win32::Globalization::{MultiByteToWideChar, CP_ACP};
-        if bytes.is_empty() { return String::new(); }
-        let wide_len = unsafe {
-            MultiByteToWideChar(
-                CP_ACP, 0,
-                bytes.as_ptr() as _, bytes.len() as i32,
-                std::ptr::null_mut(), 0,
-            )
-        };
-        if wide_len <= 0 {
-            return String::from_utf8_lossy(bytes).into_owned();
+        use windows_sys::Win32::Globalization::{CP_ACP, CP_OEMCP};
+        if let Some(s) = decode_with_codepage(bytes, CP_ACP) {
+            // CP_ACP decode 결과가 또 invalid (e.g., replacement char 가득) 면
+            // OEM 시도. 다만 단순 fallback — replacement char 있어도 일단 반환.
+            return s;
         }
-        let mut wide_buf = vec![0u16; wide_len as usize];
-        let written = unsafe {
-            MultiByteToWideChar(
-                CP_ACP, 0,
-                bytes.as_ptr() as _, bytes.len() as i32,
-                wide_buf.as_mut_ptr(), wide_len,
-            )
-        };
-        if written <= 0 {
-            return String::from_utf8_lossy(bytes).into_owned();
+        if let Some(s) = decode_with_codepage(bytes, CP_OEMCP) {
+            return s;
         }
-        wide_buf.truncate(written as usize);
-        std::ffi::OsString::from_wide(&wide_buf)
+    }
+
+    // Step 4: lossy UTF-8
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+#[cfg(windows)]
+fn decode_with_codepage(bytes: &[u8], codepage: u32) -> Option<String> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Globalization::MultiByteToWideChar;
+    if bytes.is_empty() { return Some(String::new()); }
+    let wide_len = unsafe {
+        MultiByteToWideChar(
+            codepage, 0,
+            bytes.as_ptr() as _, bytes.len() as i32,
+            std::ptr::null_mut(), 0,
+        )
+    };
+    if wide_len <= 0 { return None; }
+    let mut buf = vec![0u16; wide_len as usize];
+    let written = unsafe {
+        MultiByteToWideChar(
+            codepage, 0,
+            bytes.as_ptr() as _, bytes.len() as i32,
+            buf.as_mut_ptr(), wide_len,
+        )
+    };
+    if written <= 0 { return None; }
+    buf.truncate(written as usize);
+    Some(
+        std::ffi::OsString::from_wide(&buf)
             .to_string_lossy()
-            .into_owned()
-    }
-    #[cfg(not(windows))]
-    {
-        String::from_utf8_lossy(bytes).into_owned()
-    }
+            .into_owned(),
+    )
 }
 
 #[derive(serde::Serialize, Clone)]

@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.3.5 (2026-05-11)
+
+`decode_p4_stdout` 의 decode chain 을 UTF-8 first + CP_ACP / CP_OEMCP
+fallback 으로 수정 — v0.3.4 의 CP_ACP 만 decode 가 UTF-8 bytes 를 CP949 로
+잘못 해석하던 회귀 정정.
+
+### 배경 (MetadataEditor SL-17200 후속2)
+
+사용자 Windows release 빌드 (`chcp 949`) 에서 v0.3.4 적용 후 깨진 패턴이
+`占썼영占쏙옙[占쏙옙획]` 형태로 변화. 이는 **UTF-8 bytes 가 CP_ACP (CP949)
+로 잘못 decode** 된 전형 — UTF-8 `기` (`\xEA\xB8\xB0`) 의 첫 2 byte
+`\xEA\xB8` 가 CP949 에서 `占` 한자에 매핑되는 특징.
+
+→ Windows P4 client 가 pipe stdio (Rust Command 의 stdout) 에서는
+**UTF-8 emit**. console output 만 codepage (CP949) 변환 적용. v0.3.4 의
+CP_ACP only decode 는 잘못된 가정.
+
+### Rust crate (`sol-p4-tools`)
+
+- `decode_p4_stdout` 의 chain 을 4 단계로 변경:
+  1. `std::str::from_utf8` 으로 UTF-8 valid 검사 → success 시 그대로 (대부분
+     케이스).
+  2. Windows + UTF-8 invalid 시 `MultiByteToWideChar(CP_ACP, ...)` 로 system
+     codepage decode.
+  3. Windows + CP_ACP 도 실패 시 `CP_OEMCP` fallback.
+  4. 최후 `from_utf8_lossy` (panic 회피).
+- `decode_with_codepage` private helper 추출.
+
+### Breaking
+
+없음 (chain 추가만, 기존 시그니처 유지).
+
 ## v0.3.4 (2026-05-11)
 
 Windows 의 P4 client stdout codepage 변환 우회 — `-Mj` JSON output 도 system
