@@ -3074,12 +3074,13 @@ dependencies = [
 
 [[package]]
 name = "sol-p4-tools"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "serde",
  "serde_json",
  "sha1",
  "tauri",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

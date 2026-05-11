@@ -46,6 +46,48 @@ pub fn p4_cmd() -> std::process::Command {
     cmd
 }
 
+/// SL-17200 (v0.3.4): Windows P4 client 가 stdout 에 system ACP (e.g., CP949
+/// 한국어 Windows) 로 변환해 출력 — `-Mj` JSON output 도 동일. `from_utf8_lossy`
+/// 가 깨진 문자열 생성. `MultiByteToWideChar(CP_ACP, ...)` 로 system codepage
+/// 정확하게 decode → UTF-8 String. Linux/macOS 는 UTF-8 그대로 (`from_utf8_lossy`).
+pub fn decode_p4_stdout(bytes: &[u8]) -> String {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        use windows_sys::Win32::Globalization::{MultiByteToWideChar, CP_ACP};
+        if bytes.is_empty() { return String::new(); }
+        let wide_len = unsafe {
+            MultiByteToWideChar(
+                CP_ACP, 0,
+                bytes.as_ptr() as _, bytes.len() as i32,
+                std::ptr::null_mut(), 0,
+            )
+        };
+        if wide_len <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        let mut wide_buf = vec![0u16; wide_len as usize];
+        let written = unsafe {
+            MultiByteToWideChar(
+                CP_ACP, 0,
+                bytes.as_ptr() as _, bytes.len() as i32,
+                wide_buf.as_mut_ptr(), wide_len,
+            )
+        };
+        if written <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        wide_buf.truncate(written as usize);
+        std::ffi::OsString::from_wide(&wide_buf)
+            .to_string_lossy()
+            .into_owned()
+    }
+    #[cfg(not(windows))]
+    {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
 #[derive(serde::Serialize, Clone)]
 pub struct P4Workspace {
     pub name: String,
@@ -67,7 +109,7 @@ pub fn get_p4_stream(data_dir: Option<String>) -> String {
             if !o.user.is_empty() { cmd.args(["-u", &o.user]); }
             cmd.args(["client", "-o", &o.client]);
             if let Ok(out) = cmd.output() {
-                if let Some(s) = parse_stream_from_spec(&String::from_utf8_lossy(&out.stdout)) {
+                if let Some(s) = parse_stream_from_spec(&decode_p4_stdout(&out.stdout)) {
                     return s;
                 }
             }
@@ -85,7 +127,7 @@ pub fn get_p4_stream(data_dir: Option<String>) -> String {
         }
         let output = cmd.output().ok()?;
         if !output.status.success() { return None; }
-        Some(String::from_utf8_lossy(&output.stdout).to_string())
+        Some(decode_p4_stdout(&output.stdout).to_string())
     };
 
     if let Some(ref d) = config_dir {
@@ -145,7 +187,7 @@ pub fn list_p4_workspaces(server: String, user: String) -> Result<Vec<P4Workspac
         return Err(if err.is_empty() { "p4 clients failed".into() } else { err });
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = decode_p4_stdout(&output.stdout);
     let mut workspaces = Vec::new();
     for line in stdout.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -157,7 +199,7 @@ pub fn list_p4_workspaces(server: String, user: String) -> Result<Vec<P4Workspac
         spec_cmd.args(["client", "-o", &name]);
         let (mut stream, mut root) = (String::new(), String::new());
         if let Ok(spec_out) = spec_cmd.output() {
-            let spec = String::from_utf8_lossy(&spec_out.stdout);
+            let spec = decode_p4_stdout(&spec_out.stdout);
             for sline in spec.lines() {
                 if let Some(v) = sline.strip_prefix("Stream:") {
                     stream = extract_stream_name(v).unwrap_or_default();
@@ -199,7 +241,7 @@ pub fn check_stale_revisions(pattern: String) -> Result<Vec<String>, String> {
             stderr.trim()
         ));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = decode_p4_stdout(&output.stdout);
 
     let mut stale = Vec::new();
     let (mut depot_file, mut have_rev, mut head_rev): (Option<String>, Option<i64>, Option<i64>) = (None, None, None);
@@ -240,12 +282,12 @@ pub fn check_concurrent_edits(pattern: String) -> Result<Vec<String>, String> {
     let our_client = {
         let info_out = p4_cmd().arg("info").output().ok();
         info_out.and_then(|o| {
-            let s = String::from_utf8_lossy(&o.stdout).to_string();
+            let s = decode_p4_stdout(&o.stdout).to_string();
             s.lines().find_map(|l| l.strip_prefix("Client name:").map(|v| v.trim().to_string()))
         }).unwrap_or_default()
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = decode_p4_stdout(&output.stdout);
     let mut conflicts = Vec::new();
     for line in stdout.lines() {
         let line = line.trim();
@@ -293,7 +335,7 @@ fn fetch_user_fullnames() -> std::collections::HashMap<String, String> {
         Ok(o) if o.status.success() => o,
         _ => return map,
     };
-    let s = String::from_utf8_lossy(&out.stdout);
+    let s = decode_p4_stdout(&out.stdout);
     for line in s.lines() {
         let line = line.trim();
         if line.is_empty() { continue; }
@@ -347,7 +389,7 @@ pub fn list_pending_changes(pattern: String) -> Result<Vec<P4Change>, String> {
             stderr.trim()
         ));
     }
-    let fstat_str = String::from_utf8_lossy(&fstat_out.stdout);
+    let fstat_str = decode_p4_stdout(&fstat_out.stdout);
     let mut head_changes: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut cur_have_rev: Option<i64> = None;
     let mut cur_head_rev: Option<i64> = None;
@@ -400,7 +442,7 @@ pub fn list_pending_changes(pattern: String) -> Result<Vec<P4Change>, String> {
             stderr.trim()
         ));
     }
-    let changes_str = String::from_utf8_lossy(&changes_out.stdout);
+    let changes_str = decode_p4_stdout(&changes_out.stdout);
     let parsed = parse_p4_changes(&changes_str);
 
     // Step 3: user FullName lookup (failures fallback to user id).
@@ -515,7 +557,7 @@ mod tests_p4_changes {
 
 pub fn resolve_local_path(depot_path: &str) -> Option<String> {
     let output = p4_cmd().args(["where", depot_path]).output().ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = decode_p4_stdout(&output.stdout);
     stdout.lines().next().and_then(|l| l.split_whitespace().last().map(|s| s.to_string()))
 }
 
@@ -535,7 +577,7 @@ pub struct P4PendingChanges {
 pub fn get_p4_pending(pattern: String) -> Result<P4PendingChanges, String> {
     let mut files = Vec::new();
     if let Ok(output) = p4_cmd().args(["opened", &pattern]).output() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = decode_p4_stdout(&output.stdout);
         for line in stdout.lines() {
             let line = line.trim();
             if line.is_empty() { continue; }
@@ -570,7 +612,7 @@ pub fn get_p4_diff(file_path: String, action: String) -> Result<P4FileDiff, Stri
 
     let output = p4_cmd().args(["diff", "-du", &file_path]).output()
         .map_err(|e| format!("p4 diff failed: {e}"))?;
-    Ok(P4FileDiff { file, diff: String::from_utf8_lossy(&output.stdout).to_string() })
+    Ok(P4FileDiff { file, diff: decode_p4_stdout(&output.stdout).to_string() })
 }
 
 pub fn p4_edit(path: &str) -> Result<(), String> {
@@ -634,6 +676,6 @@ pub fn p4_max_protect(depot_path: &str) -> Result<String, String> {
         }
         return Err(stderr);
     }
-    let level = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let level = decode_p4_stdout(&output.stdout).trim().to_string();
     Ok(if level.is_empty() { "none".to_string() } else { level })
 }

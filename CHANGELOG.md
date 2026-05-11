@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.3.4 (2026-05-11)
+
+Windows 의 P4 client stdout codepage 변환 우회 — `-Mj` JSON output 도 system
+ACP (CP949 등) 로 변환되어 깨졌던 한글이 정상 표시.
+
+### 배경 (MetadataEditor SL-17200 후속)
+
+v0.3.3 의 `-Mj -ztag` JSON output 도 Windows 에서 한글 mojibake.
+`chcp 65001` 후 정상 = **P4 client 가 stdout 에 console output codepage
+적용**. Rust 의 `from_utf8_lossy` 가 CP949 bytes 를 UTF-8 로 해석 시 깨짐.
+`P4 server` 가 non-unicode 모드라 `-C utf8` / `P4COMMANDCHARSET` 등도 효과 X.
+
+### Rust crate (`sol-p4-tools`)
+
+- `decode_p4_stdout(bytes)` 함수 신설. Windows 에서 Win32
+  `MultiByteToWideChar(CP_ACP, ...)` 호출 → system codepage 정확하게 decode
+  → UTF-16 → UTF-8 String. Linux/macOS 는 `from_utf8_lossy` 그대로.
+- 모든 P4 stdout 처리 callsite 를 `decode_p4_stdout` 으로 일괄 전환 (10건).
+  영향 명령: get_p4_stream / list_p4_workspaces / check_stale_revisions /
+  check_concurrent_edits / list_pending_changes / fetch_user_fullnames /
+  get_p4_pending / get_p4_diff / p4_max_protect 등.
+- `[target.'cfg(windows)'.dependencies]` 로 `windows-sys` (Win32_Globalization
+  feature) 추가. Linux/macOS 빌드 의존성 영향 없음.
+
+### Breaking
+
+없음 (`decode_p4_stdout` 은 추가, 기존 함수 시그니처 유지).
+
 ## v0.3.3 (2026-05-11)
 
 `p4 changes` / `p4 users` 호출을 `-Mj -ztag` JSON output 으로 전환 —
