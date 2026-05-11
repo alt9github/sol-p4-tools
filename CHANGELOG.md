@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.3.3 (2026-05-11)
+
+`p4 changes` / `p4 users` 호출을 `-Mj -ztag` JSON output 으로 전환 —
+Windows console codepage (CP949 등) 변환에 따른 한글 description /
+FullName 깨짐 (mojibake) 회피.
+
+### 배경 (MetadataEditor SL-17200)
+
+v0.3.2 의 plain text `p4 changes -l` / `p4 users` output 이 Windows release
+환경에서 한글 mojibake (`���` 같은 �) 로 표시. P4 server 가 non-unicode
+mode 라 client-side codepage 변환이 적용 — macOS (UTF-8) 는 정상, Windows
+(CP949) 는 깨짐. Rust 의 `from_utf8_lossy` 가 codepage bytes 를 정상 변환
+못 함.
+
+### Rust crate (`sol-p4-tools`)
+
+- `list_pending_changes` 의 `p4 changes` 호출에 `-Mj -ztag` flag 추가.
+  output 이 JSON lines — encoding 의존 우회 (P4 server 의 unicode 모드와
+  무관하게 UTF-8 보장).
+- `fetch_user_fullnames` 의 `p4 users` 도 동일 변경.
+- `P4Change.time` 타입 변경: `String` (YYYY/MM/DD) → `i64` (Unix epoch
+  seconds). JSON output 의 raw timestamp 그대로 — locale-aware 변환은
+  caller (frontend) 책임. chrono dep 회피.
+- `parse_p4_changes` 가 plain text multi-line parser → JSON line parser.
+  serde_json 사용 (기존 dependency).
+
+### 테스트
+
+- `parse_p4_changes` — single / multi / empty / malformed line skipped /
+  **korean description preserved** (SL-17200 회귀 방지) 5 케이스.
+
+### Breaking 가능성
+
+- `P4Change.time` 타입 변경 (string → i64) — caller TS / Rust 코드 영향.
+  MetadataEditor 의 SyncPromptDialog / P4Panel UI 가 동시 업데이트
+  (Date 변환은 frontend).
+
 ## v0.3.2 (2026-05-11)
 
 `list_pending_changes` 추가 — 외부 변경 감지 UI 가 file 목록 대신 changelist

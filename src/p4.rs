@@ -267,6 +267,12 @@ pub fn check_concurrent_edits(pattern: String) -> Result<Vec<String>, String> {
 ///
 /// `user_fullname` 은 `p4 users` 의 결과로 lookup 한 사람 이름 (e.g. "임종현").
 /// lookup 실패 시 `user` (id) 와 동일.
+///
+/// `time` 은 Unix epoch (seconds) — caller (frontend) 가 locale-aware 변환.
+/// Rust 측 자체 date format 변환 안 함 (chrono 의존 회피 + locale 선택은 UI 책임).
+///
+/// v0.3.3 (SL-17200) — Windows console codepage 인코딩 깨짐 회피를 위해
+/// `p4 changes -Mj -ztag` JSON output 사용. 한글 description / FullName 정상.
 #[derive(serde::Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct P4Change {
@@ -274,27 +280,35 @@ pub struct P4Change {
     pub user: String,
     pub user_fullname: String,
     pub client: String,
-    pub time: String,        // YYYY/MM/DD
+    pub time: i64,           // Unix epoch seconds
     pub description: String, // first non-empty line, trimmed
 }
 
-/// `p4 users` → `{user_id → FullName}` 맵. 실패 시 빈 맵 (lookup fallback 으로 user id).
-/// 형식: `<user> <email> (<FullName>) accessed <date>`
+/// `p4 -Mj -ztag users` → `{user_id → FullName}` 맵. 실패 시 빈 맵.
+/// JSON output: `{"User":"id","FullName":"...","Email":"...",...}` line-by-line.
+/// v0.3.3 (SL-17200): 텍스트 parse → JSON (Windows console codepage 인코딩 깨짐 회피).
 fn fetch_user_fullnames() -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
-    let out = match p4_cmd().arg("users").output() {
+    let out = match p4_cmd().args(["-Mj", "-ztag", "users"]).output() {
         Ok(o) if o.status.success() => o,
         _ => return map,
     };
     let s = String::from_utf8_lossy(&out.stdout);
     for line in s.lines() {
-        let space = match line.find(' ') { Some(i) => i, None => continue };
-        let user = &line[..space];
-        let open = match line.find('(') { Some(i) => i, None => continue };
-        let close = match line[open..].find(')') { Some(i) => open + i, None => continue };
-        if close <= open + 1 { continue; }
-        let fullname = &line[open + 1..close];
-        map.insert(user.to_string(), fullname.to_string());
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let user = match v.get("User").and_then(|x| x.as_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let fullname = v.get("FullName").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if !fullname.is_empty() {
+            map.insert(user, fullname);
+        }
     }
     map
 }
@@ -371,11 +385,11 @@ pub fn list_pending_changes(pattern: String) -> Result<Vec<P4Change>, String> {
     flush_record(&mut cur_have_rev, &mut cur_head_rev, &mut cur_head_change, &mut head_changes);
     if head_changes.is_empty() { return Ok(Vec::new()); }
 
-    // Step 2: changes range 받기
+    // Step 2: changes range 받기 (JSON output — Windows codepage 우회).
     let min_change = *head_changes.iter().min().unwrap();
     let range_pattern = format!("{}@{},#head", pattern, min_change);
     let changes_out = p4_cmd()
-        .args(["changes", "-l", "-s", "submitted", &range_pattern])
+        .args(["-Mj", "-ztag", "changes", "-l", "-s", "submitted", &range_pattern])
         .output()
         .map_err(|e| format!("p4 changes failed: {e}"))?;
     if !changes_out.status.success() {
@@ -405,56 +419,44 @@ pub fn list_pending_changes(pattern: String) -> Result<Vec<P4Change>, String> {
     Ok(filtered)
 }
 
-/// `p4 changes -l` 의 multi-line 출력 파싱.
-/// 형식:
-/// ```text
-/// Change <num> on <YYYY/MM/DD> by <user>@<client>
-///
-/// 	<description first line>
-/// 	<description more lines...>
-///
-/// Change <num> on ...
-/// ```
+/// `p4 -Mj -ztag changes -l` 의 JSON line output 파싱. line 당 하나의 change.
+/// 형식: `{"change":"12345","user":"id","client":"...","desc":"...","time":"<unix>",...}`
+/// v0.3.3 (SL-17200) — 텍스트 parse → JSON (Windows console codepage 깨짐 회피).
 fn parse_p4_changes(s: &str) -> Vec<P4Change> {
     let mut out = Vec::new();
-    let mut current: Option<P4Change> = None;
-    let mut desc_lines: Vec<String> = Vec::new();
-
     for line in s.lines() {
-        if let Some(rest) = line.strip_prefix("Change ") {
-            // flush previous
-            if let Some(mut c) = current.take() {
-                c.description = desc_lines
-                    .iter()
-                    .map(|l| l.trim())
-                    .find(|l| !l.is_empty())
-                    .unwrap_or("")
-                    .to_string();
-                out.push(c);
-                desc_lines.clear();
-            }
-            // header: <num> on <date> by <user>@<client>
-            let parts: Vec<&str> = rest.split_whitespace().collect();
-            if parts.len() >= 5 && parts[1] == "on" && parts[3] == "by" {
-                let number: i64 = parts[0].parse().unwrap_or(0);
-                let time = parts[2].to_string();
-                let mut uc = parts[4].splitn(2, '@');
-                let user = uc.next().unwrap_or("").to_string();
-                let client = uc.next().unwrap_or("").to_string();
-                current = Some(P4Change { number, user_fullname: String::new(), user, client, time, description: String::new() });
-            }
-        } else if current.is_some() && !line.is_empty() {
-            desc_lines.push(line.to_string());
-        }
-    }
-    if let Some(mut c) = current.take() {
-        c.description = desc_lines
-            .iter()
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let number: i64 = v.get("change")
+            .and_then(|x| x.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if number == 0 { continue; }
+        let user = v.get("user").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let client = v.get("client").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let time: i64 = v.get("time")
+            .and_then(|x| x.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let desc_full = v.get("desc").and_then(|x| x.as_str()).unwrap_or("");
+        let description = desc_full
+            .lines()
             .map(|l| l.trim())
             .find(|l| !l.is_empty())
             .unwrap_or("")
             .to_string();
-        out.push(c);
+        out.push(P4Change {
+            number,
+            user,
+            user_fullname: String::new(),
+            client,
+            time,
+            description,
+        });
     }
     out
 }
@@ -464,20 +466,20 @@ mod tests_p4_changes {
     use super::*;
 
     #[test]
-    fn parse_single_change() {
-        let s = "Change 12345 on 2026/05/11 by jonghyun@my_client\n\n\tFirst line of description.\n\tSecond line.\n";
+    fn parse_single_change_json() {
+        let s = r#"{"change":"12345","user":"jonghyun","client":"my_client","desc":"First line.\nSecond.","time":"1778499509"}"#;
         let r = parse_p4_changes(s);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].number, 12345);
         assert_eq!(r[0].user, "jonghyun");
         assert_eq!(r[0].client, "my_client");
-        assert_eq!(r[0].time, "2026/05/11");
-        assert_eq!(r[0].description, "First line of description.");
+        assert_eq!(r[0].time, 1778499509);
+        assert_eq!(r[0].description, "First line.");
     }
 
     #[test]
-    fn parse_multiple_changes() {
-        let s = "Change 100 on 2026/01/01 by a@c1\n\n\tdesc a\n\nChange 101 on 2026/01/02 by b@c2\n\n\tdesc b\n";
+    fn parse_multiple_changes_json() {
+        let s = "{\"change\":\"100\",\"user\":\"a\",\"client\":\"c1\",\"desc\":\"desc a\",\"time\":\"1\"}\n{\"change\":\"101\",\"user\":\"b\",\"client\":\"c2\",\"desc\":\"desc b\",\"time\":\"2\"}\n";
         let r = parse_p4_changes(s);
         assert_eq!(r.len(), 2);
         assert_eq!(r[0].number, 100);
@@ -493,11 +495,21 @@ mod tests_p4_changes {
     }
 
     #[test]
-    fn parse_malformed_header_skipped() {
-        // 헤더 줄이 형식 어긋남 — 새 entry 시작 안 함.
-        let s = "Change garbage line\n\n\tdesc\n";
+    fn parse_malformed_line_skipped() {
+        // JSON 이 아닌 라인은 skip. number=0 인 record 도 skip.
+        let s = "garbage line\n{\"change\":\"\",\"user\":\"x\"}\n{\"change\":\"42\",\"user\":\"u\",\"client\":\"c\",\"desc\":\"ok\",\"time\":\"1\"}\n";
         let r = parse_p4_changes(s);
-        assert_eq!(r.len(), 0);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].number, 42);
+    }
+
+    #[test]
+    fn parse_korean_description_preserved() {
+        // SL-17200 회귀 방지 — JSON output 이 한글 정상 보존.
+        let s = r#"{"change":"7","user":"u","client":"c","desc":"[기획][서영오] 월드 보스 (50 -> 30)","time":"1"}"#;
+        let r = parse_p4_changes(s);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].description, "[기획][서영오] 월드 보스 (50 -> 30)");
     }
 }
 
