@@ -187,7 +187,18 @@ pub fn check_stale_revisions(pattern: String) -> Result<Vec<String>, String> {
         .args(["fstat", "-T", "depotFile,haveRev,headRev", &pattern])
         .output()
         .map_err(|e| format!("p4 fstat failed: {e}"))?;
-    if !output.status.success() { return Ok(Vec::new()); }
+    if !output.status.success() {
+        // 비정상 종료 (인증 만료 / client lock / server 부하 등) 를 silent 로
+        // 빈 배열 변환하면 caller 측 store 가 "0건 검출" 로 오인해 stale 표시가
+        // 사라지는 회귀 (SL-17195). stderr 포함해 Err 로 전파 — 호출 측은
+        // 이전 값을 유지하는 정책으로 처리.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "p4 fstat non-zero exit (code={:?}): {}",
+            output.status.code(),
+            stderr.trim()
+        ));
+    }
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     let mut stale = Vec::new();
@@ -215,7 +226,16 @@ pub fn check_concurrent_edits(pattern: String) -> Result<Vec<String>, String> {
         .args(["opened", "-a", &pattern])
         .output()
         .map_err(|e| format!("p4 opened -a failed: {e}"))?;
-    if !output.status.success() { return Ok(Vec::new()); }
+    if !output.status.success() {
+        // SL-17195: 비정상 종료 silent 변환 금지 — `check_stale_revisions` 와
+        // 동일 정책. stderr 포함해 Err 로 전파.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "p4 opened -a non-zero exit (code={:?}): {}",
+            output.status.code(),
+            stderr.trim()
+        ));
+    }
 
     let our_client = {
         let info_out = p4_cmd().arg("info").output().ok();
