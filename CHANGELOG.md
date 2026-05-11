@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.3.6 (2026-05-11)
+
+`P4CHARSET=utf8` 환경 변수 강제 — Unicode server 환경에서 P4 client 가 stdout
+으로 항상 UTF-8 bytes emit 하도록 보장. SL-17200 의 진정한 root cause fix.
+
+### 배경 (MetadataEditor SL-17200 후속3)
+
+진단 끝에 P4 server 가 **Unicode mode** 확인 (`P4CHARSET=none` 시
+"Unicode server permits only unicode enabled clients" 에러). 사용자 env
+default `P4CHARSET=auto` 가 client console codepage 따라 client charset 자동
+결정하는데, Tauri pipe stdio 환경에서 잘못 결정되어 stdout 이 CP949 또는
+double-encoded garbage byte stream → Rust 의 `from_utf8_lossy` /
+`MultiByteToWideChar` 어떤 decode 도 정확하지 않음.
+
+`P4CHARSET=utf8` 직접 시도 (Windows shell 의 hex dump) 시 stdout 이 정확한
+UTF-8 byte sequence (`EA B8 B0` = 기, `ED 9A 8D` = 획 등) 확인. P4 client 가
+P4CHARSET 환경 변수 명시 시 그 charset 정확히 사용.
+
+### Rust crate (`sol-p4-tools`)
+
+- `p4_bare()` 에 `cmd.env("P4CHARSET", "utf8")` 추가. 모든 p4 명령에 자동
+  적용 (p4_bare → p4_cmd 모두 영향). P4 server unicode 환경에서 stdout
+  UTF-8 보장.
+- decode_p4_stdout 의 chain (1) UTF-8 first 가 그대로 통과 — 정상.
+
+### Breaking
+
+P4 server 가 **non-unicode** 환경에서는 P4 client 가 "P4CHARSET set, but
+server doesn't support unicode" 에러로 모든 명령 거부 가능. 현재 sol-p4-tools
+의 가정은 unicode server. non-unicode server 지원 필요 시 fallback 로직
+추가 필요.
+
 ## v0.3.5 (2026-05-11)
 
 `decode_p4_stdout` 의 decode chain 을 UTF-8 first + CP_ACP / CP_OEMCP

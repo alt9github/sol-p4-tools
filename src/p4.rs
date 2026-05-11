@@ -24,9 +24,18 @@ fn set_override(v: Option<P4Override>) {
 /// would otherwise flash on every invocation from a GUI parent (Tauri webview).
 /// Always route p4 spawns through this (or `p4_cmd` for the override-applied
 /// variant) — do not call `Command::new("p4")` directly from consumers.
+///
+/// v0.3.6 (SL-17200): `P4CHARSET=utf8` 환경 변수 강제. Unicode server 환경에서
+/// P4 가 stdout 으로 항상 UTF-8 bytes emit 하도록 — 사용자 env 의 default
+/// `P4CHARSET=auto` 가 Tauri pipe stdio 환경에서 console codepage 따라
+/// 잘못 결정되어 한글 mojibake (사용자 환경: chcp 949 → P4 가 CP949 emit 또는
+/// double-encoded garbage). non-unicode server 환경에서는 P4 가 "P4CHARSET
+/// set, but server doesn't support unicode" 거부 — 그 경우 caller 가 fallback
+/// 처리 필요 (현재 sol-p4-tools 의 가정: unicode server).
 pub fn p4_bare() -> std::process::Command {
     #[allow(unused_mut)]
     let mut cmd = std::process::Command::new("p4");
+    cmd.env("P4CHARSET", "utf8");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
