@@ -261,6 +261,246 @@ pub fn check_concurrent_edits(pattern: String) -> Result<Vec<String>, String> {
     Ok(conflicts)
 }
 
+/// 사용자가 미동기화한 submitted changelist 메타데이터.
+/// v0.3.2 (MetadataEditor SL-17196) — 외부 변경 감지 UI 가 file 목록 대신
+/// CL 목록을 표시할 때 사용.
+///
+/// `user_fullname` 은 `p4 users` 의 결과로 lookup 한 사람 이름 (e.g. "임종현").
+/// lookup 실패 시 `user` (id) 와 동일.
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct P4Change {
+    pub number: i64,
+    pub user: String,
+    pub user_fullname: String,
+    pub client: String,
+    pub time: String,        // YYYY/MM/DD
+    pub description: String, // first non-empty line, trimmed
+}
+
+/// `p4 users` → `{user_id → FullName}` 맵. 실패 시 빈 맵 (lookup fallback 으로 user id).
+/// 형식: `<user> <email> (<FullName>) accessed <date>`
+fn fetch_user_fullnames() -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let out = match p4_cmd().arg("users").output() {
+        Ok(o) if o.status.success() => o,
+        _ => return map,
+    };
+    let s = String::from_utf8_lossy(&out.stdout);
+    for line in s.lines() {
+        let space = match line.find(' ') { Some(i) => i, None => continue };
+        let user = &line[..space];
+        let open = match line.find('(') { Some(i) => i, None => continue };
+        let close = match line[open..].find(')') { Some(i) => open + i, None => continue };
+        if close <= open + 1 { continue; }
+        let fullname = &line[open + 1..close];
+        map.insert(user.to_string(), fullname.to_string());
+    }
+    map
+}
+
+/// `pattern` (예: `<dataDir>/...`) 의 stale 파일들에 영향을 준 submitted
+/// changelist 목록을 반환. file 단위 stale 표시보다 의미 압축 — "어느 CL 이
+/// 아직 sync 안 됐는지 + 누가 무엇을 했는지" 를 한 화면에.
+///
+/// 알고리즘:
+///   1. `p4 fstat -F headChange>haveChange -T headChange <pattern>` — stale 인
+///      파일들의 headChange 집합 추출 (P4 의 `@have+1` 표기 미지원 우회).
+///   2. min(headChange) 부터 `#head` 까지의 changes 를 `p4 changes -l -s
+///      submitted <pattern>@<min>,#head` 로 받음.
+///   3. parse 후 changeNumber ∈ stale headChange 집합 인 항목만 filter.
+///
+/// stale 가 없으면 빈 `Vec` 반환. P4 명령 비정상 종료는 stderr 포함 `Err` 로
+/// 전파 (v0.3.1 패턴).
+#[tauri::command]
+pub fn list_pending_changes(pattern: String) -> Result<Vec<P4Change>, String> {
+    // Step 1: 모든 파일의 (haveRev, headRev, headChange) 받기 + client side filter.
+    //
+    // 주의: `haveChange` attribute 는 P4 server / protocol 설정에 따라
+    // 출력 안 될 수 있어 stale 판정에 신뢰 못 함 (실제 환경에서 누락 확인).
+    // `haveRev / headRev` 는 항상 출력 → check_stale_revisions 와 동일한
+    // rev 기반 판정으로 통일. stale 파일의 headChange 를 별도로 받아 CL
+    // 집합 구성.
+    let fstat_out = p4_cmd()
+        .args(["fstat", "-T", "depotFile,haveRev,headRev,headChange", &pattern])
+        .output()
+        .map_err(|e| format!("p4 fstat (for changes) failed: {e}"))?;
+    if !fstat_out.status.success() {
+        let stderr = String::from_utf8_lossy(&fstat_out.stderr);
+        return Err(format!(
+            "p4 fstat (for changes) non-zero exit (code={:?}): {}",
+            fstat_out.status.code(),
+            stderr.trim()
+        ));
+    }
+    let fstat_str = String::from_utf8_lossy(&fstat_out.stdout);
+    let mut head_changes: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut cur_have_rev: Option<i64> = None;
+    let mut cur_head_rev: Option<i64> = None;
+    let mut cur_head_change: Option<i64> = None;
+    let flush_record = |have_rev: &mut Option<i64>,
+                        head_rev: &mut Option<i64>,
+                        head_change: &mut Option<i64>,
+                        out: &mut std::collections::HashSet<i64>| {
+        if let (Some(hv), Some(hr), Some(hc)) = (*have_rev, *head_rev, *head_change) {
+            // stale = 기존 sync 한 파일인데 새 revision 있음 (haveRev < headRev).
+            // 신규 파일 (haveRev None) 은 skip — check_stale_revisions 와 일관.
+            // 신규 파일을 포함하면 각각 다른 CL 에서 만들어진 경우가 많아 head_changes
+            // 집합이 폭발 → CL 수가 stale 파일 수보다 훨씬 커지는 결과 (사용자 보고:
+            // 196 stale → 519 CL). 신규 파일 분리는 V1.x 후속 검토.
+            if hv < hr { out.insert(hc); }
+        }
+        *have_rev = None;
+        *head_rev = None;
+        *head_change = None;
+    };
+    for line in fstat_str.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            flush_record(&mut cur_have_rev, &mut cur_head_rev, &mut cur_head_change, &mut head_changes);
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("... haveRev ") {
+            cur_have_rev = v.parse().ok();
+        } else if let Some(v) = line.strip_prefix("... headRev ") {
+            cur_head_rev = v.parse().ok();
+        } else if let Some(v) = line.strip_prefix("... headChange ") {
+            cur_head_change = v.parse().ok();
+        }
+    }
+    flush_record(&mut cur_have_rev, &mut cur_head_rev, &mut cur_head_change, &mut head_changes);
+    if head_changes.is_empty() { return Ok(Vec::new()); }
+
+    // Step 2: changes range 받기
+    let min_change = *head_changes.iter().min().unwrap();
+    let range_pattern = format!("{}@{},#head", pattern, min_change);
+    let changes_out = p4_cmd()
+        .args(["changes", "-l", "-s", "submitted", &range_pattern])
+        .output()
+        .map_err(|e| format!("p4 changes failed: {e}"))?;
+    if !changes_out.status.success() {
+        let stderr = String::from_utf8_lossy(&changes_out.stderr);
+        return Err(format!(
+            "p4 changes non-zero exit (code={:?}): {}",
+            changes_out.status.code(),
+            stderr.trim()
+        ));
+    }
+    let changes_str = String::from_utf8_lossy(&changes_out.stdout);
+    let parsed = parse_p4_changes(&changes_str);
+
+    // Step 3: user FullName lookup (failures fallback to user id).
+    let fullnames = fetch_user_fullnames();
+
+    // Step 4: stale headChange set 에 속한 CL 만 (다른 path 가 같은 range 에 있어도
+    // 그 변경이 stale 한 metadata 파일에 영향 준 게 아니면 제외) + fullname 채움.
+    let filtered: Vec<P4Change> = parsed
+        .into_iter()
+        .filter(|c| head_changes.contains(&c.number))
+        .map(|mut c| {
+            c.user_fullname = fullnames.get(&c.user).cloned().unwrap_or_else(|| c.user.clone());
+            c
+        })
+        .collect();
+    Ok(filtered)
+}
+
+/// `p4 changes -l` 의 multi-line 출력 파싱.
+/// 형식:
+/// ```text
+/// Change <num> on <YYYY/MM/DD> by <user>@<client>
+///
+/// 	<description first line>
+/// 	<description more lines...>
+///
+/// Change <num> on ...
+/// ```
+fn parse_p4_changes(s: &str) -> Vec<P4Change> {
+    let mut out = Vec::new();
+    let mut current: Option<P4Change> = None;
+    let mut desc_lines: Vec<String> = Vec::new();
+
+    for line in s.lines() {
+        if let Some(rest) = line.strip_prefix("Change ") {
+            // flush previous
+            if let Some(mut c) = current.take() {
+                c.description = desc_lines
+                    .iter()
+                    .map(|l| l.trim())
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("")
+                    .to_string();
+                out.push(c);
+                desc_lines.clear();
+            }
+            // header: <num> on <date> by <user>@<client>
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.len() >= 5 && parts[1] == "on" && parts[3] == "by" {
+                let number: i64 = parts[0].parse().unwrap_or(0);
+                let time = parts[2].to_string();
+                let mut uc = parts[4].splitn(2, '@');
+                let user = uc.next().unwrap_or("").to_string();
+                let client = uc.next().unwrap_or("").to_string();
+                current = Some(P4Change { number, user_fullname: String::new(), user, client, time, description: String::new() });
+            }
+        } else if current.is_some() && !line.is_empty() {
+            desc_lines.push(line.to_string());
+        }
+    }
+    if let Some(mut c) = current.take() {
+        c.description = desc_lines
+            .iter()
+            .map(|l| l.trim())
+            .find(|l| !l.is_empty())
+            .unwrap_or("")
+            .to_string();
+        out.push(c);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests_p4_changes {
+    use super::*;
+
+    #[test]
+    fn parse_single_change() {
+        let s = "Change 12345 on 2026/05/11 by jonghyun@my_client\n\n\tFirst line of description.\n\tSecond line.\n";
+        let r = parse_p4_changes(s);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].number, 12345);
+        assert_eq!(r[0].user, "jonghyun");
+        assert_eq!(r[0].client, "my_client");
+        assert_eq!(r[0].time, "2026/05/11");
+        assert_eq!(r[0].description, "First line of description.");
+    }
+
+    #[test]
+    fn parse_multiple_changes() {
+        let s = "Change 100 on 2026/01/01 by a@c1\n\n\tdesc a\n\nChange 101 on 2026/01/02 by b@c2\n\n\tdesc b\n";
+        let r = parse_p4_changes(s);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].number, 100);
+        assert_eq!(r[0].description, "desc a");
+        assert_eq!(r[1].number, 101);
+        assert_eq!(r[1].description, "desc b");
+    }
+
+    #[test]
+    fn parse_empty() {
+        let r = parse_p4_changes("");
+        assert_eq!(r.len(), 0);
+    }
+
+    #[test]
+    fn parse_malformed_header_skipped() {
+        // 헤더 줄이 형식 어긋남 — 새 entry 시작 안 함.
+        let s = "Change garbage line\n\n\tdesc\n";
+        let r = parse_p4_changes(s);
+        assert_eq!(r.len(), 0);
+    }
+}
+
 pub fn resolve_local_path(depot_path: &str) -> Option<String> {
     let output = p4_cmd().args(["where", depot_path]).output().ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);

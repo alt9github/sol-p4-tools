@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.3.2 (2026-05-11)
+
+`list_pending_changes` 추가 — 외부 변경 감지 UI 가 file 목록 대신 changelist
+목록 (CL 번호 / 사용자 / description) 으로 표시 가능하게 함.
+
+### 배경 (MetadataEditor SL-17196)
+
+기존 `check_stale_revisions` 가 stale 한 file 목록을 반환 — UI 가 174 file
+나열 같은 형태로 표시했음. 사용자 멘탈 모델은 CL 단위 ("누가 어떤 CL 을
+sync 안 했는가") 라 file 목록은 정보 압축이 부족.
+
+### Rust crate (`sol-p4-tools`)
+
+- `P4Change` struct (`#[serde(rename_all = "camelCase")]`) — `number / user /
+  user_fullname / client / time / description`. `user_fullname` 은 `p4 users`
+  로 lookup 한 사람 이름 (e.g., "임종현"). lookup 실패 시 user id 와 동일.
+- `p4::list_pending_changes(pattern)` — stale 파일들에 영향을 준 submitted
+  changelist 목록. 알고리즘:
+  1. `p4 fstat -T "depotFile,haveRev,headRev,headChange" <pattern>` — 모든
+     파일 + client side filter (`haveRev < headRev` 인 파일의 `headChange`
+     집합). P4 의 `-F` 는 두 attribute 간 비교를 지원 안 해 client 측 필터.
+     `haveChange` 는 P4 server/protocol 설정에 따라 출력 안 될 수 있어
+     `haveRev / headRev` 기반으로 stale 판정 (check_stale_revisions 와 일관).
+     신규 파일 (haveRev None) 은 skip — 신규 파일을 포함하면 head_changes
+     집합이 폭발해 CL 수가 stale 파일 수보다 훨씬 커짐.
+  2. min(headChange) ~ #head 범위의 changes 받기: `p4 changes -l -s submitted
+     <pattern>@<min>,#head`.
+  3. parse 후 changeNumber ∈ headChange 집합 인 항목만 filter + user_fullname
+     채움.
+- `fetch_user_fullnames()` (private) — `p4 users` 결과를 `{user_id →
+  FullName}` 맵으로 반환. 형식: `<user> <email> (<FullName>) accessed <date>`.
+- 비정상 종료는 stderr 포함 `Err` 전파 (v0.3.1 패턴).
+
+### 테스트
+
+- `parse_p4_changes` — single / multi / empty / malformed header 4 케이스.
+
 ## v0.3.1 (2026-05-11)
 
 P4 명령 비정상 종료를 silent 로 흡수하던 동작 정정 — 호출 측이 "검사 실패"
