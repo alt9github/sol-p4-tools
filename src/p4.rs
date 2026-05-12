@@ -55,18 +55,17 @@ pub fn p4_cmd() -> std::process::Command {
     cmd
 }
 
-/// SL-17200 (v0.3.4/v0.3.5): P4 stdout 의 인코딩이 OS / P4 client / stdio
-/// 종류에 따라 달라 fallback chain 으로 처리:
-///   1. UTF-8 valid 이면 그대로 (macOS / Linux / P4 가 UTF-8 emit 하는 Windows).
-///   2. Windows 에서 `MultiByteToWideChar(CP_ACP, ...)` 로 system codepage
-///      (CP949 등) decode 시도.
-///   3. Windows 에서 OEM codepage fallback (console default 와 다른 경우).
-///   4. 최후 fallback — `from_utf8_lossy` (깨진 문자라도 panic 없이).
+/// P4 stdout decode — `P4CHARSET=utf8` (v0.3.6 의 p4_bare 강제) 환경에서
+/// 거의 항상 Step 1 (UTF-8 valid) 통과. Step 2~4 는 **non-unicode P4 server
+/// 보험** 또는 P4CHARSET 환경 변수가 어떤 이유로 적용 안 되는 edge case
+/// 대비:
+///   1. UTF-8 valid → 그대로 (정상 path).
+///   2. Windows + UTF-8 invalid → CP_ACP decode (CP949 등 system locale).
+///   3. Windows + CP_ACP 실패 → OEM codepage.
+///   4. 최후 — `from_utf8_lossy` (panic 회피).
 ///
-/// UTF-8 first 는 `-Mj` JSON output 이 Windows pipe stdio 에서도 raw UTF-8
-/// bytes 일 가능성 (`chcp 65001` 후 정상 표시되는 것이 console encoding
-/// 변경 vs P4 출력 인코딩 변경 어느 쪽인지 모호 — UTF-8 valid 검사가
-/// 가장 안전).
+/// non-unicode P4 server 사용 시점에 Step 1 이 안 통과하기 시작하면 Step 2
+/// 가 동작. 그 환경 지원 확정 후 chain 재평가 (v1.0 이후).
 pub fn decode_p4_stdout(bytes: &[u8]) -> String {
     // Step 1: UTF-8 valid?
     if let Ok(s) = std::str::from_utf8(bytes) {
