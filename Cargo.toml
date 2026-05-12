@@ -1,6 +1,6 @@
 [package]
 name = "sol-p4-tools"
-version = "0.3.6"
+version = "0.4.0"
 edition = "2021"
 description = "Perforce (P4) integration toolkit for Tauri v2 apps"
 repository = "https://github.com/alt9github/sol-p4-tools"
@@ -12,8 +12,8 @@ serde_json = "1"
 sha1 = "0.10"
 tauri = { version = "2", features = [] }
 
-# v0.3.4 (MetadataEditor SL-17200): Windows P4 client 가 stdout 에 system
-# ACP (e.g., CP949) 로 변환한 bytes 를 MultiByteToWideChar 로 정확하게
-# decode 하기 위함. Linux/macOS 빌드에는 영향 없음 (cfg(windows)).
+# Windows P4 client 가 stdout 에 system ACP (e.g., CP949) 로 변환한 bytes 를
+# MultiByteToWideChar 로 정확하게 decode 하기 위함. Linux/macOS 빌드에는 영향
+# 없음 (cfg(windows)).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Globalization"] }

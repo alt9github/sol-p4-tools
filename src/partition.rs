@@ -19,11 +19,11 @@ mod tests {
 
     #[test]
     fn partition_postfix_deterministic() {
-        let a = compute_partition_postfix("Dev1Next", "test_pk");
-        let b = compute_partition_postfix("Dev1Next", "test_pk");
+        let a = compute_partition_postfix("release", "test_pk");
+        let b = compute_partition_postfix("release", "test_pk");
         assert_eq!(a, b);
-        assert!(a.starts_with("dev1next"));
-        assert_eq!(a.len(), "dev1next".len() + 1);
+        assert!(a.starts_with("release"));
+        assert_eq!(a.len(), "release".len() + 1);
     }
 
     #[test]

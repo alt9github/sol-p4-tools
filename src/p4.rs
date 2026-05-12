@@ -541,11 +541,11 @@ mod tests_p4_changes {
 
     #[test]
     fn parse_single_change_json() {
-        let s = r#"{"change":"12345","user":"jonghyun","client":"my_client","desc":"First line.\nSecond.","time":"1778499509"}"#;
+        let s = r#"{"change":"12345","user":"alice","client":"my_client","desc":"First line.\nSecond.","time":"1778499509"}"#;
         let r = parse_p4_changes(s);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].number, 12345);
-        assert_eq!(r[0].user, "jonghyun");
+        assert_eq!(r[0].user, "alice");
         assert_eq!(r[0].client, "my_client");
         assert_eq!(r[0].time, 1778499509);
         assert_eq!(r[0].description, "First line.");
