@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.5.0 (2026-05-12)
+
+**Breaking** — `compute_partition_postfix` signature simplified: `stream` argument removed.
+Migration: callers must drop the stream argument and update their file-name format
+(was `{Schema}_{stream_lower}{hex}.json`, now `{Schema}_{hex}.json`).
+
+### Rust crate (`sol-p4-tools`)
+
+- `partition::compute_partition_postfix(pk: &str) -> String` — returns a single
+  uppercase hex char (`"0"`..`"F"`), the high nibble of `SHA1(pk)[0]`. 16 buckets.
+- `partition::get_stream_prefix` removed (no remaining callers; was a stream-only helper).
+
+### Migration notes for callers
+
+- File-naming convention is now stream-agnostic. Concatenate with the schema name
+  directly: `format!("{schema}_{}.json", compute_partition_postfix(pk))`.
+- Existing on-disk partition files (with `_<stream>{hex}.json` postfix) require
+  separate rename / migration; this crate is forward-only.
+
 ## v0.4.0 (2026-05-12)
 
 Two new modules — `sync` and `self_update` — extracted from a downstream
