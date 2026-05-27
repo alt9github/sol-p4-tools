@@ -127,26 +127,24 @@ pub struct P4Workspace {
     pub root: String,
 }
 
+/// v0.6.0 (SL-17746): display Name 우선 + path basename 케이싱 보존.
+///
+/// 흐름:
+///   1. stream **path** 식별 (p4 client -o 의 `Stream:` 줄 / p4 info 의
+///      `Client stream:` 줄).
+///   2. path 가 있으면 `p4 stream -o <path>` 호출 → `Name:` 필드 우선.
+///   3. Name 비어있으면 path basename fallback (대소문자 보존).
+///   4. 모두 실패하면 `p4 switch` 의 task stream 이름 (대소문자 보존).
+///
+/// 이전 (v0.5.0 까지): 항상 `.to_lowercase()` 된 path basename.
+/// 사용자 가시 영향: stream rename (path: `//Sol/Dev1Next`, Name: `Dev2`) 시
+/// `dev1next` 대신 `Dev2` 표시.
 #[tauri::command]
 pub fn get_p4_stream(data_dir: Option<String>) -> String {
     let path = data_dir.as_deref().map(PathBuf::from);
     let config_dir = path.as_ref().and_then(|p| {
         p.ancestors().find(|a| a.join(".p4config").is_file()).map(|p| p.to_path_buf())
     });
-
-    if let Some(o) = get_override() {
-        if !o.client.is_empty() {
-            let mut cmd = p4_bare();
-            if !o.server.is_empty() { cmd.args(["-p", &o.server]); }
-            if !o.user.is_empty() { cmd.args(["-u", &o.user]); }
-            cmd.args(["client", "-o", &o.client]);
-            if let Ok(out) = cmd.output() {
-                if let Some(s) = parse_stream_from_spec(&decode_p4_stdout(&out.stdout)) {
-                    return s;
-                }
-            }
-        }
-    }
 
     let run_p4 = |args: &[&str]| -> Option<String> {
         let mut cmd = p4_cmd();
@@ -162,48 +160,144 @@ pub fn get_p4_stream(data_dir: Option<String>) -> String {
         Some(decode_p4_stdout(&output.stdout).to_string())
     };
 
-    if let Some(ref d) = config_dir {
-        if let Ok(content) = std::fs::read_to_string(d.join(".p4config")) {
-            let client = content.lines()
-                .find_map(|l| l.strip_prefix("P4CLIENT=").map(|v| v.trim().to_string()));
-            if let Some(c) = client {
-                if let Some(out) = run_p4(&["client", "-o", &c]) {
-                    if let Some(s) = parse_stream_from_spec(&out) { return s; }
+    // Step 1: stream path 식별.
+    let stream_path: Option<String> = (|| {
+        if let Some(o) = get_override() {
+            if !o.client.is_empty() {
+                let mut cmd = p4_bare();
+                if !o.server.is_empty() { cmd.args(["-p", &o.server]); }
+                if !o.user.is_empty() { cmd.args(["-u", &o.user]); }
+                cmd.args(["client", "-o", &o.client]);
+                if let Ok(out) = cmd.output() {
+                    if let Some(p) = parse_stream_path_from_spec(&decode_p4_stdout(&out.stdout)) {
+                        return Some(p);
+                    }
                 }
             }
         }
+        if let Some(ref d) = config_dir {
+            if let Ok(content) = std::fs::read_to_string(d.join(".p4config")) {
+                let client = content.lines()
+                    .find_map(|l| l.strip_prefix("P4CLIENT=").map(|v| v.trim().to_string()));
+                if let Some(c) = client {
+                    if let Some(out) = run_p4(&["client", "-o", &c]) {
+                        if let Some(p) = parse_stream_path_from_spec(&out) { return Some(p); }
+                    }
+                }
+            }
+        }
+        if let Some(out) = run_p4(&["info"]) {
+            if let Some(p) = parse_stream_path_from_info(&out) { return Some(p); }
+        }
+        None
+    })();
+
+    // Step 2~3: path 가 있으면 Name 우선 → basename fallback.
+    if let Some(p) = stream_path {
+        if let Some(out) = run_p4(&["stream", "-o", &p]) {
+            if let Some(name) = parse_stream_display_name(&out) {
+                return name;
+            }
+        }
+        return extract_stream_basename(&p).unwrap_or_default();
     }
 
+    // Step 4: task stream fallback (p4 switch — basename only).
     if let Some(out) = run_p4(&["switch"]) {
         for line in out.lines() {
             let t = line.trim();
-            if !t.is_empty() && !t.starts_with("//") { return t.to_lowercase(); }
-        }
-    }
-
-    if let Some(out) = run_p4(&["info"]) {
-        for line in out.lines() {
-            if let Some(v) = line.strip_prefix("Client stream:") {
-                if let Some(s) = extract_stream_name(v) { return s; }
-            }
+            if !t.is_empty() && !t.starts_with("//") { return t.to_string(); }
         }
     }
 
     String::new()
 }
 
-fn parse_stream_from_spec(spec: &str) -> Option<String> {
+/// `p4 client -o` 스펙에서 `Stream:` 줄의 path (e.g., `//Sol/Dev1Next`) 추출.
+fn parse_stream_path_from_spec(spec: &str) -> Option<String> {
     for line in spec.lines() {
         if let Some(v) = line.strip_prefix("Stream:") {
-            return extract_stream_name(v);
+            let p = v.trim();
+            if !p.is_empty() { return Some(p.to_string()); }
         }
     }
     None
 }
 
-fn extract_stream_name(raw: &str) -> Option<String> {
-    let s = raw.trim().trim_start_matches("//");
-    s.rsplit('/').next().filter(|n| !n.is_empty()).map(|n| n.to_lowercase())
+/// `p4 info` 출력에서 `Client stream:` 줄의 path 추출.
+fn parse_stream_path_from_info(info: &str) -> Option<String> {
+    for line in info.lines() {
+        if let Some(v) = line.strip_prefix("Client stream:") {
+            let p = v.trim();
+            if !p.is_empty() { return Some(p.to_string()); }
+        }
+    }
+    None
+}
+
+/// `p4 stream -o <path>` 스펙에서 `Name:` 줄의 display name 추출.
+fn parse_stream_display_name(spec: &str) -> Option<String> {
+    for line in spec.lines() {
+        if let Some(v) = line.strip_prefix("Name:") {
+            let n = v.trim();
+            if !n.is_empty() { return Some(n.to_string()); }
+        }
+    }
+    None
+}
+
+/// path (e.g., `//Sol/Dev1Next`) 의 basename 추출 — 대소문자 보존.
+fn extract_stream_basename(path: &str) -> Option<String> {
+    let s = path.trim().trim_start_matches("//");
+    s.rsplit('/').next().filter(|n| !n.is_empty()).map(|n| n.to_string())
+}
+
+#[cfg(test)]
+mod tests_stream_parse {
+    use super::*;
+
+    #[test]
+    fn parse_stream_path_from_spec_basic() {
+        let spec = "Client: foo\nStream:\t//Sol/Dev1Next\nRoot:\t/tmp\n";
+        assert_eq!(parse_stream_path_from_spec(spec), Some("//Sol/Dev1Next".to_string()));
+    }
+
+    #[test]
+    fn parse_stream_path_from_spec_missing() {
+        let spec = "Client: foo\nRoot:\t/tmp\n";
+        assert_eq!(parse_stream_path_from_spec(spec), None);
+    }
+
+    #[test]
+    fn parse_stream_path_from_info_basic() {
+        let info = "Client name: foo\nClient root: /tmp\nClient stream: //Sol/Dev1Next\n";
+        assert_eq!(parse_stream_path_from_info(info), Some("//Sol/Dev1Next".to_string()));
+    }
+
+    #[test]
+    fn parse_stream_display_name_basic() {
+        let spec = "Stream:\t//Sol/Dev1Next\nName:\tDev2\nParent:\t//Sol/Dev1\n";
+        assert_eq!(parse_stream_display_name(spec), Some("Dev2".to_string()));
+    }
+
+    #[test]
+    fn parse_stream_display_name_empty_returns_none() {
+        let spec = "Stream:\t//Sol/Dev1Next\nName:\t\nParent:\t//Sol/Dev1\n";
+        assert_eq!(parse_stream_display_name(spec), None);
+    }
+
+    #[test]
+    fn extract_stream_basename_preserves_case() {
+        assert_eq!(extract_stream_basename("//Sol/Dev1Next"), Some("Dev1Next".to_string()));
+        assert_eq!(extract_stream_basename("//Sol/Main"), Some("Main".to_string()));
+        assert_eq!(extract_stream_basename("//Sol/Dev1Next_AssistTool"), Some("Dev1Next_AssistTool".to_string()));
+    }
+
+    #[test]
+    fn extract_stream_basename_empty() {
+        assert_eq!(extract_stream_basename(""), None);
+        assert_eq!(extract_stream_basename("//"), None);
+    }
 }
 
 #[tauri::command]
@@ -229,15 +323,32 @@ pub fn list_p4_workspaces(server: String, user: String) -> Result<Vec<P4Workspac
         if !server.is_empty() { spec_cmd.args(["-p", &server]); }
         if !user.is_empty() { spec_cmd.args(["-u", &user]); }
         spec_cmd.args(["client", "-o", &name]);
-        let (mut stream, mut root) = (String::new(), String::new());
+        let (mut stream_path, mut root) = (String::new(), String::new());
         if let Ok(spec_out) = spec_cmd.output() {
             let spec = decode_p4_stdout(&spec_out.stdout);
             for sline in spec.lines() {
                 if let Some(v) = sline.strip_prefix("Stream:") {
-                    stream = extract_stream_name(v).unwrap_or_default();
+                    stream_path = v.trim().to_string();
                 } else if let Some(v) = sline.strip_prefix("Root:") {
                     root = v.trim().to_string();
                 }
+            }
+        }
+        // v0.6.0: display Name (e.g., "Dev2") 우선, 없으면 path basename
+        // ("Dev1Next") fallback. get_p4_stream 과 동일 정책.
+        let mut stream = String::new();
+        if !stream_path.is_empty() {
+            let mut name_cmd = p4_bare();
+            if !server.is_empty() { name_cmd.args(["-p", &server]); }
+            if !user.is_empty() { name_cmd.args(["-u", &user]); }
+            name_cmd.args(["stream", "-o", &stream_path]);
+            if let Ok(name_out) = name_cmd.output() {
+                if let Some(n) = parse_stream_display_name(&decode_p4_stdout(&name_out.stdout)) {
+                    stream = n;
+                }
+            }
+            if stream.is_empty() {
+                stream = extract_stream_basename(&stream_path).unwrap_or_default();
             }
         }
         workspaces.push(P4Workspace { name, stream, root });
